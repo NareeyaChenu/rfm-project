@@ -1,2 +1,4 @@
 .venv
 *.json
+wsis-infra
+__pycache__
