@@ -1,6 +1,6 @@
 
 import json
-from context.order_context import query_orders , count_document
+from context.order_context import query_orders, count_document
 from context.member_context import find_one
 from context.member_tag_context import find_member_tag_list
 from context.member_channel_context import find_list_member_channels
@@ -9,33 +9,35 @@ from jellyfish import jaro_winkler_similarity
 import time
 import random
 import string
+from datetime import datetime
 
 
-start_date = "2025-08-01"
-end_date = "2025-08-31"
+start_date = "2025-10-01"
+end_date = "2025-10-31"
+
 
 def export_order():
 
     print("export order ...")
     filter = {
-        '$and' : [
-            {"date_created" : {'$gte' : f'{start_date} 00:00:00'}},
-            {"date_created" : {'$lte' : f'{end_date} 23:59:59'}}
+        '$and': [
+            {"date_created": {'$gte': f'{start_date} 00:00:00'}},
+            {"date_created": {'$lte': f'{end_date} 23:59:59'}}
         ],
-        'order_status_id' : {'$ne' : 4}
+        'order_status_id': {'$ne': 4},
+        'order_from': {'$ne': 22},
     }
 
+    print(filter)
 
-    
     documents = count_document(filter)
 
-    if(documents <= 0) : 
+    if (documents <= 0):
         print("No order to Excecute")
         return
 
-
-    print(f"toatl order {documents}")
-    list_order  = []
+    print(f"tatal order {documents}")
+    list_order = []
     batch_size = 100
     total_fetched = 0
     skip = 0
@@ -51,17 +53,14 @@ def export_order():
         print(f"Processing batch {skip}: {fetched_count} orders")
         list_order.extend(orders)
         total_fetched += batch_size
-        
+
         skip += batch_size
         if total_fetched >= documents:
             break
         time.sleep(2.5)
 
-
-
     with open(f"orders/orders_{start_date}_to_{end_date}.json", "w", encoding="utf-8") as f:
         json.dump(list_order, f, ensure_ascii=False, indent=4, default=str)
-
 
 
 def normalize(text):
@@ -145,25 +144,27 @@ def identify_customer():
         print("❌ No Match")
 
 
-def find_wsis_id():
+def find_wsis_id(input_path: string, output_path):
 
-    with open("orders.json", "r", encoding="utf-8") as f:
+    with open(input_path, "r", encoding="utf-8") as f:
         orders = json.load(f)
 
     def random_str():
         random_word = ''.join(random.choices(string.ascii_lowercase, k=5))
         return random_word
-    for order in orders:
 
-        print(f"Process order {order.get("order_id")}")
+    print(f"process file : {input_path}")
+    print(f"total order to process : {len(orders)}")
+    for order in orders:
+        print(f"Process order {orders.index(order)}: {order.get('order_id')}")
         if order.get("member_id") is not None:
             member = find_one({"_id": order["member_id"]})
 
-            time.sleep(1)
+            time.sleep(2)
 
             tags = find_member_tag_list({"member_id": order["member_id"]})
 
-            time.sleep(1)
+            time.sleep(2)
 
             channels = find_list_member_channels(
                 {"member_id": order["member_id"]})
@@ -186,47 +187,62 @@ def find_wsis_id():
                 elif ig_id:
                     platform = "INSTAGRAM"
                     social_id = ig_id
-
-                randon_str = random_str()
-
                 if len(channels) <= 0:
 
                     order["social"] = [
                         {
-                            "social_id": f"{social_id}{randon_str}",
+                            "social_id": f"{social_id}",
                             "platform": platform,
                             "social_name": social_name,
                             "wsis_id": order["member_id"]
                         }
                     ]
-                
-                else :
+
+                else:
                     socials = []
 
-                    for channel in channels :
+                    for channel in channels:
                         social = {
-                            "social_id": f"{social_id}{randon_str}",
+                            "social_id": f"{social_id}",
                             "platform": platform,
                             "social_name": social_name,
-                            "wsis_id": order["member_id"] , 
-                            "channel_name" : channel.get("channel_name" , None)
+                            "wsis_id": order["member_id"],
+                            "channel_name": channel.get("channel_name", None)
                         }
                         socials.append(social)
                     order["social"] = socials
 
-
-
                 tag_names = [item["tag_name"] for item in tags]
 
-                order["tags"] = tag_names
-        time.sleep(3)
+                notes = member.get("notes", [])
+                new_notes = []
+                for note in notes:
+                    new_note = {
+                        "text": note.get("value", ""),
+                        "modified_date": note.get("modified_date"),
+                        "note_id" : note.get("note_id")
+                    }
+                    new_notes.append(new_note)
 
-    with open("orders_v2.json", "w", encoding="utf-8") as f:
+                order["tags"] = tag_names
+                order["notes"] = new_notes
+        time.sleep(3.5)
+
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(orders, f, ensure_ascii=False, indent=4, default=str)
+
+    
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"Find WSIS ID Successfully at: {now}")
 
 
 if __name__ == "__main__":
-    # find_wsis_id()
 
+    folder_path = "orders"
+    input_path = f"{folder_path}/orders_2025-10-01_to_2025-10-31.json"
 
-    export_order()
+    output_path = "process/process_orders_2025-10-01_to_2025-10-31.json"
+
+    find_wsis_id(input_path, output_path)
+
+    # export_order()

@@ -2,3 +2,6 @@ jellyfish==1.1.0
 rapidfuzz==3.10.0
 pandas==2.2.2
 pymongo==4.6.0
+fuzzywuzzy==0.18.0
+phonenumbers==8.13.45
+python-Levenshtein==0.25.1

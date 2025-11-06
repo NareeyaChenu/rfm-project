@@ -17,7 +17,8 @@ Output schema (per profile):
   "name": "First Last",
   "address": "Full shipping address",
   "sources": [
-    { "channel_id": "...", "platform": "...", "channel_name": "...", "wsis_id": "...", "platform_id": "..." }
+    { "channel_id": "...", "platform": "...", "channel_name": "...",
+        "wsis_id": "...", "platform_id": "..." }
   ],
   "orders": [{ "order_id": 123, "grand_total": "123.45" }],
   "phone_numbers": [{ "phone_number": "+66XXXXXXXXX", "is_primary": true }],
@@ -46,6 +47,8 @@ except Exception:
 # --- Normalization helpers ----------------------------------------------------
 
 NOISE_KEYWORDS = {"shopee", "line shopping", "international", "ส่งต่างประเทศ"}
+PROVIDER_ID = "9d68882715c24e71942e0a9d020fe963"
+
 
 def normalize_phone(phone: str) -> str:
     """Return Thai local digits (no +66/0), ignore masked values."""
@@ -65,12 +68,15 @@ def normalize_phone(phone: str) -> str:
         digits = digits[1:]
     return digits
 
+
 def to_e164_th(local_digits: str) -> str:
     """Convert Thai local digits to +66 E.164-like for output."""
     return "+66" + local_digits if local_digits else ""
 
+
 def normalize_email(email: str) -> str:
     return (email or "").strip().lower()
+
 
 def _dedup_preserve(seq):
     seen, out = set(), []
@@ -81,6 +87,7 @@ def _dedup_preserve(seq):
     return out
 
 # --- Field extraction ---------------------------------------------------------
+
 
 def build_names(order: dict) -> list[str]:
     """Collect plausible names from several sources; drop masked/placeholder forms."""
@@ -104,6 +111,7 @@ def build_names(order: dict) -> list[str]:
         names.append(name)
     return _dedup_preserve(names)
 
+
 def build_address(order: dict) -> str:
     parts = [
         order.get("shipping_address_1") or "",
@@ -116,6 +124,7 @@ def build_address(order: dict) -> str:
     parts = [p.strip() for p in parts if p and p.strip()]
     return ", ".join(parts)
 
+
 def phones_from_order(order: dict) -> list[str]:
     fields = [
         order.get("phone") or "",
@@ -123,6 +132,7 @@ def phones_from_order(order: dict) -> list[str]:
         (order.get("line_shopping_info") or {}).get("phoneNumber") or "",
     ]
     return _dedup_preserve([normalize_phone(p) for p in fields if normalize_phone(p)])
+
 
 def emails_from_order(order: dict) -> list[str]:
     fields = [
@@ -132,6 +142,7 @@ def emails_from_order(order: dict) -> list[str]:
     ]
     return _dedup_preserve([normalize_email(e) for e in fields if normalize_email(e)])
 
+
 def social_ids(order: dict) -> set[str]:
     ids = []
     for s in (order.get("social") or []):
@@ -139,12 +150,14 @@ def social_ids(order: dict) -> set[str]:
             ids.append(s["social_id"])
     return set(ids)
 
+
 def shopee_user_id(order: dict) -> str:
     s = order.get("shopee_info") or {}
     uid = s.get("shopee_user_id")
     return str(uid) if uid not in (None, "") else ""
 
 # --- Similarity / matching ----------------------------------------------------
+
 
 def ratio(a: str, b: str) -> int:
     if not a or not b:
@@ -155,6 +168,7 @@ def ratio(a: str, b: str) -> int:
     import difflib
     return int(round(difflib.SequenceMatcher(a=a.lower(), b=b.lower()).ratio() * 100))
 
+
 def name_similarity(order_a: dict, order_b: dict) -> int:
     names_a, names_b = build_names(order_a), build_names(order_b)
     best = 0
@@ -163,8 +177,10 @@ def name_similarity(order_a: dict, order_b: dict) -> int:
             best = max(best, ratio(na, nb))
     return best
 
+
 def address_similarity(order_a: dict, order_b: dict) -> int:
     return ratio(build_address(order_a), build_address(order_b))
+
 
 def strong_identifier_match(order_a: dict, order_b: dict) -> bool:
     # exact phone/email/social/shopee matches are strong
@@ -178,6 +194,7 @@ def strong_identifier_match(order_a: dict, order_b: dict) -> bool:
     if sa and sb and sa == sb:
         return True
     return False
+
 
 def is_same_customer(order_a: dict,
                      order_b: dict,
@@ -216,13 +233,17 @@ def is_same_customer(order_a: dict,
 
 # --- Clustering ---------------------------------------------------------------
 
+
 def cluster_orders(orders, name_strong, addr_strong, score_threshold):
     clusters: list[list[dict]] = []
-    for order in orders:
+    for idx , order in enumerate(orders , 1):
+
+        print(f"Process cluster order {idx}")
         placed = False
         for cluster in clusters:
             if any(
-                is_same_customer(order, existing, name_strong, addr_strong, score_threshold)
+                is_same_customer(order, existing, name_strong,
+                                 addr_strong, score_threshold)
                 for existing in cluster
             ):
                 cluster.append(order)
@@ -233,6 +254,7 @@ def cluster_orders(orders, name_strong, addr_strong, score_threshold):
     return clusters
 
 # --- Profile building ---------------------------------------------------------
+
 
 def choose_best_name(names: list[str]) -> str:
     """Pick most frequent; on ties prefer cleaner names (no brand/noise), then shorter."""
@@ -249,6 +271,7 @@ def choose_best_name(names: list[str]) -> str:
     cands.sort(key=rank)
     return cands[0]
 
+
 def freq_choice(values: list[str]) -> str:
     if not values:
         return ""
@@ -258,6 +281,7 @@ def freq_choice(values: list[str]) -> str:
     # prefer longer address on tie (more complete)
     cands.sort(key=lambda v: (-len(v), v))
     return cands[0]
+
 
 def derive_customer_id(cluster: list[dict]) -> str:
     """Prefer stable IDs if present; otherwise uuid5 over key attributes (stable across runs)."""
@@ -283,16 +307,35 @@ def derive_customer_id(cluster: list[dict]) -> str:
         if addr:
             addrs.add(addr)
 
-    basis = "|".join(sorted(phones) + sorted(emails) + sorted(names) + sorted(addrs))
+    basis = "|".join(sorted(phones) + sorted(emails) +
+                     sorted(names) + sorted(addrs))
     if not basis:
         basis = "orderids:" + "|".join(str(o["order_id"]) for o in cluster)
     return str(uuid5(NAMESPACE_URL, basis))
 
+
 def cluster_to_profile(cluster: list[dict]) -> dict:
     customer_id = derive_customer_id(cluster)
-
+    
     # Orders
-    orders_list = [{"order_id": o["order_id"], "grand_total": o.get("grand_total", "")} for o in cluster]
+    orders_list = [
+        {
+            "order_id": o.get("order_id"),
+            "order_from": o.get("order_from"),
+            "order_date": o.get("created_date"),
+            "products": [
+                {
+                    "product_id": p.get("product_id"),
+                    "product_name": p.get("name"),
+                    "sku" : p.get("sku")
+                }
+                for p in (o.get("products") or [])
+            ],
+            "grand_total": float(o.get("grand_total", 0) or 0.0),
+        }
+        for o in cluster
+        if o.get("order_id")  # include only valid orders
+    ]
 
     # Phones
     phone_digits = []
@@ -323,24 +366,57 @@ def cluster_to_profile(cluster: list[dict]) -> dict:
 
     # Sources = Social + Shopee
     sources = []
-    for o in cluster:
+    for idx, o in enumerate(cluster, 1):
+        print(f"Processing cluster_to_profile {idx} of {len(cluster)}")
         for s in (o.get("social") or []):
             sources.append({
                 "channel_id": o.get("channel_id"),
                 "platform": s.get("platform"),
                 "channel_name": s.get("channel_name"),
                 "wsis_id": s.get("wsis_id"),
-                "platform_id": s.get("social_id"),  # Social Id
+                "social_name": s.get("social_name"),
+                "social_id": str(s["social_id"]) if s.get("social_id") is not None else None  # Social Id
             })
         sh = o.get("shopee_info") or {}
         if sh.get("shopee_user_id"):
             sources.append({
                 "channel_id": o.get("channel_id"),
-                "platform": "SHOPEE",
+                "platform": "SHOPEE", 
                 "channel_name": sh.get("shopee_user_name"),
                 "wsis_id": None,
-                "platform_id": str(sh.get("shopee_user_id")),  # Shopee userId
+                "social_id": str(sh["shopee_user_id"]) if sh.get("shopee_user_id") is not None else None,  # Shopee userId
             })
+
+        # 3️⃣ Lazada
+        if o.get("order_from") == 12:
+            laz = o.get("lazada_info") or {}
+            sources.append({
+                "channel_id": o.get("channel_id"),
+                "platform": "LAZADA",
+                "channel_name": laz.get("lazada_user_name"),
+                "wsis_id": None,
+                "social_id": str(laz["lazada_user_id"]) if laz.get("lazada_user_id") is not None else None,
+            })
+
+        # 4️⃣ LINE Shopping
+        if o.get("order_from") == 21:
+            line = o.get("line_info") or {}
+            sources.append({
+                "channel_id": o.get("channel_id"),
+                "platform": "LINE SHOPPING",
+                "channel_name": line.get("line_user_name"),
+                "wsis_id": None,
+                "social_id": str(line["line_user_id"]) if line.get("line_user_id") is not None else None,
+            })
+        unique_sources = []
+        seen = set()
+        for s in sources:
+            key = (s.get("platform"), s.get("social_id"))
+            if key not in seen:
+                seen.add(key)
+                unique_sources.append(s)
+
+        sources = unique_sources
 
     # Tags (merge all unique tags across orders)
     tags = []
@@ -348,22 +424,50 @@ def cluster_to_profile(cluster: list[dict]) -> dict:
         tags.extend(o.get("tags", []))
     tags = _dedup_preserve(tags)
 
+    notes = []
+    note_ids = set()
+
+    for o in cluster:
+        for note in o.get("notes", []):
+            note_id = note.get("note_id")
+            if note_id not in note_ids:
+                # Create a copy to avoid modifying original data
+                clean_note = dict(note)
+                clean_note.pop("note_id", None)  # Remove note_id
+                notes.append(clean_note)
+                note_ids.add(note_id)
+    structured_addrs = []
+    for o in cluster:
+        structured_addrs.append({
+        "line1": (o.get("shipping_address_1") or "").strip(),
+        "line2": (o.get("shipping_address_2") or "").strip(),
+        "subdistrict": (o.get("shipping_subdistrict") or "").strip(),
+        "district": (o.get("shipping_district") or "").strip(),
+        "province": (o.get("shipping_province") or "").strip(),
+        "zipcode": (o.get("shipping_zipcode") or "").strip(),
+        "full": build_address(o),
+        })
+    # notes = _dedup_preserve(notes)
+
     return {
-        "customer_id": customer_id,
-        "name": name,
+        "_id": customer_id,
+        "full_name": name,
         "address": address,
         "sources": sources,
         "orders": orders_list,
-        "phone_numbers": phone_numbers,
-        "emails": emails_out,
-        "tags": tags  # ✅ new
+        "addresses": structured_addrs,
+        "phones": [p["phone_number"] for p in phone_numbers if "phone_number" in p],
+        "emails": [p["email"] for p in emails_out if "email" in p],
+        "tags": tags , # ✅ new
+        "provider_id" : PROVIDER_ID ,
+        "notes" : notes
     }
 
 # --- Main ---------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description="Identify unique customers from orders JSON.")
-    ap.add_argument("--input", "-i", default="mock_orders.json", help="Path to input orders JSON.")
+    ap.add_argument("--input", "-i", default="all_orders.json", help="Path to input orders JSON.")
     ap.add_argument("--output", "-o", default="crm_customer_profiles.json", help="Path to write output JSON.")
     ap.add_argument("--name-strong", type=int, default=90, help="Name similarity threshold considered strong (0-100).")
     ap.add_argument("--addr-strong", type=int, default=88, help="Address similarity threshold considered strong (0-100).")
@@ -372,6 +476,8 @@ def main():
 
     with open(args.input, "r", encoding="utf-8") as f:
         orders = json.load(f)
+    
+    print(f"all order {len(orders)}")
 
     clusters = cluster_orders(orders, args.name_strong, args.addr_strong, args.score_threshold)
     profiles = [cluster_to_profile(c) for c in clusters]
