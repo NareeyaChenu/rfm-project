@@ -8,6 +8,7 @@ import json
 import re
 from collections import Counter
 from uuid import uuid5, NAMESPACE_URL
+from difflib import SequenceMatcher
 
 NOISE_KEYWORDS = {"shopee", "line shopping", "international", "ส่งต่างประเทศ"}
 PROVIDER_ID = "9d68882715c24e71942e0a9d020fe963"
@@ -64,40 +65,42 @@ def shopee_user_id(order):
     s = order.get("shopee_info") or {}
     return str(s.get("shopee_user_id")) if s.get("shopee_user_id") else ""
 
-def strong_identifier_match(a, b):
-    return (
-        set(phones_from_order(a)) & set(phones_from_order(b))
-        or set(emails_from_order(a)) & set(emails_from_order(b))
-        or social_ids(a) & social_ids(b)
-        or (shopee_user_id(a) and shopee_user_id(a) == shopee_user_id(b))
-        or (a.get("member_id") and a.get("member_id") == b.get("member_id"))
-        or (a.get("extern_member_id") and a.get("extern_member_id") == b.get("extern_member_id"))
-    )
+def names_similar(name1: str, name2: str, threshold: float = 0.85) -> bool:
+    if not name1 or not name2:
+        return False
+    
+    # Normalize and remove common Thai and English prefixes
+    def clean_name(name: str) -> str:
+        name = name.strip().lower()
+        # Remove common prefixes
+        prefixes = [
+            # Thai common prefixes
+            r"^คุณ", r"^นาย", r"^นาง", r"^นางสาว", r"^น\.ส\.", r"^นส\.", r"^ด\.ช\.", r"^ด\.ญ\.",
+            r"^เด็กชาย", r"^เด็กหญิง", r"^ว่าที่\s*ร\.", r"^พระ", r"^พระครู", r"^พระมหา",
+            r"^หลวงพ่อ", r"^สมเด็จพระ", r"^หม่อม", r"^หม่อมราชวงศ์", r"^หม่อมหลวง",
+            r"^ม\.ร\.ว\.", r"^ม\.ล\.",
+            # Academic or military titles
+            r"^ดร\.", r"^ศ\.", r"^รศ\.", r"^ผศ\.", r"^อ\.", r"^ร\.ต\.", r"^ร\.ต\.อ\.", r"^พ\.ต\.",
+            r"^พ\.ต\.อ\.", r"^พล\.ต\.", r"^จ\.ส\.ต\.", r"^จ\.ส\.อ\.", r"^ส\.ต\.ต\.",
+            # English prefixes
+            r"^mr\.?", r"^mrs\.?", r"^miss", r"^ms\.?", r"^mx\.?", r"^dr\.?", r"^prof\.?",
+            r"^rev\.?", r"^sir", r"^madam", r"^lady", r"^lt\.?", r"^capt\.?", r"^col\.?", r"^maj\.?", r"^gen\.?"
+        ]
 
-def cluster_orders(orders):
-    clusters = []
-    for order in orders:
-        for cluster in clusters:
-            if any(strong_identifier_match(order, other) for other in cluster):
-                cluster.append(order)
-                break
-        else:
-            clusters.append([order])
-    # second pass merge
-    merged = True
-    while merged:
-        merged = False
-        for i, a in enumerate(clusters):
-            for j in range(i + 1, len(clusters)):
-                b = clusters[j]
-                if any(strong_identifier_match(x, y) for x in a for y in b):
-                    a.extend(b)
-                    clusters.pop(j)
-                    merged = True
-                    break
-            if merged:
-                break
-    return clusters
+        for p in prefixes:
+            name = re.sub(p, "", name, flags=re.IGNORECASE).strip()
+        # Remove multiple spaces
+        name = re.sub(r"\s+", " ", name)
+        return name
+    
+    name1_clean = clean_name(name1)
+    name2_clean = clean_name(name2)
+    return SequenceMatcher(None, name1_clean.lower(), name2_clean.lower()).ratio() >= threshold
+
+def addresses_similar(addr1: str, addr2: str, threshold: float = 0.85) -> bool:
+    if not addr1 or not addr2:
+        return False
+    return SequenceMatcher(None, addr1.lower(), addr2.lower()).ratio() >= threshold
 
 def build_address(order):
     parts = [
@@ -126,6 +129,48 @@ def build_names(order):
         if name and "*" not in name and "-" not in name:
             names.append(name)
     return _dedup_preserve(names)
+
+def tiered_match(a, b):
+    if a.get("order_from") == 16 and b.get("order_from") == 16:
+        return shopee_user_id(a) and shopee_user_id(a) == shopee_user_id(b)
+
+    # Order from != 16
+    if set(phones_from_order(a)) & set(phones_from_order(b)):
+        return True
+
+    wsis_a = {s.get("wsis_id") for s in (a.get("social") or []) if s.get("wsis_id")}
+    wsis_b = {s.get("wsis_id") for s in (b.get("social") or []) if s.get("wsis_id")}
+    if wsis_a & wsis_b:
+        return True
+
+    if social_ids(a) & social_ids(b):
+        return True
+
+    addr_a = build_address(a)
+    addr_b = build_address(b)
+    if addresses_similar(addr_a, addr_b):
+        return True
+
+    for n1 in build_names(a):
+        for n2 in build_names(b):
+            if names_similar(n1, n2):
+                return True
+
+    return False
+
+def cluster_orders(orders):
+    clusters = []
+    for idx, order in enumerate(orders):
+        print(f"Processing order index {idx}: {order.get('order_id') if isinstance(order, dict) else order}")
+        for cluster_idx, cluster in enumerate(clusters):
+            if any(tiered_match(order, other) for other in cluster):
+                print(f"  → Found match in cluster {cluster_idx}")
+                cluster.append(order)
+                break
+        else:
+            print(f"  → No match found, creating new cluster {len(clusters)}")
+            clusters.append([order])
+    return clusters
 
 def choose_best_name(names):
     if not names: return ""
@@ -156,7 +201,6 @@ def derive_customer_id(cluster):
 
 def cluster_to_profile(cluster):
     customer_id = derive_customer_id(cluster)
-
     orders_list = [{
         "order_id": o.get("order_id"),
         "order_from": o.get("order_from"),
@@ -164,6 +208,16 @@ def cluster_to_profile(cluster):
         "products": [{"product_id": p.get("product_id"), "product_name": p.get("name"), "sku": p.get("sku")} for p in (o.get("products") or [])],
         "grand_total": float(o.get("grand_total", 0) or 0.0),
     } for o in cluster if o.get("order_id")]
+
+    unique_orders = []
+    seen_ids = set()
+    for order in orders_list:
+        order_id = order["order_id"]
+        if order_id not in seen_ids:
+            seen_ids.add(order_id)
+            unique_orders.append(order)
+        else:
+            print(f"⚠️ Duplicate order_id {order_id} removed")
 
     phone_digits = [p for o in cluster for p in phones_from_order(o)]
     ph_counts = Counter(phone_digits)
@@ -218,8 +272,9 @@ def cluster_to_profile(cluster):
                 "wsis_id": None,
                 "social_id": str(line.get("line_user_id"))
             })
-    unique_sources = []
+
     seen = set()
+    unique_sources = []
     for s in sources:
         key = (s.get("platform"), s.get("social_id"))
         if key not in seen:
@@ -246,12 +301,30 @@ def cluster_to_profile(cluster):
         "full": build_address(o)
     } for o in cluster]
 
+
+    # Remove duplicates by checking only specific fields
+    unique_addresses = []
+    seen = set()
+
+    for addr in structured_addrs:
+        key = (
+            addr.get("line1", "").strip(),
+            addr.get("line2", "").strip(),
+            addr.get("subdistrict", "").strip(),
+            addr.get("district", "").strip(),
+            addr.get("province", "").strip(),
+            addr.get("zipcode", "").strip(),
+        )
+        if key not in seen:
+            seen.add(key)
+            unique_addresses.append(addr)
+
     return {
         "_id": customer_id,
         "full_name": name,
         "sources": unique_sources,
-        "orders": orders_list,
-        "addresses": structured_addrs,
+        "orders": unique_orders,
+        "addresses": unique_addresses,
         "phones": [p["phone_number"] for p in phone_numbers],
         "emails": [p["email"] for p in emails_out],
         "tags": tags,
@@ -261,12 +334,16 @@ def cluster_to_profile(cluster):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", default="test-order.json")
+    ap.add_argument("--input", default="all_orders.json")
     ap.add_argument("--output", default="fix_crm_customer_profiles.json")
     args = ap.parse_args()
 
     with open(args.input, "r", encoding="utf-8") as f:
         orders = json.load(f)
+    
+
+
+    print(f"total order to process {len(orders)}")
 
     clusters = cluster_orders(orders)
     profiles = [cluster_to_profile(c) for c in clusters]
